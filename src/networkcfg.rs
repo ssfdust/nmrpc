@@ -6,12 +6,12 @@ use nm::{
     Client, ConnectionExt, IPAddress, SettingIP4Config, SettingIP6Config, SettingIPConfigExt,
     SETTING_IP4_CONFIG_METHOD_AUTO, SETTING_IP4_CONFIG_METHOD_MANUAL,
 };
+use std::net::IpAddr;
 
 pub struct IPConfig {
-    version: u32,
-    address: String,
-    gateway: String,
-    dns: String,
+    address: IpAddr,
+    gateway: IpAddr,
+    dns: IpAddr,
     prefix: u32,
 }
 
@@ -21,7 +21,13 @@ pub struct NetworkConfig {
     ipv6cfg: Option<IPConfig>,
 }
 
+// impl From<&str> for NetworkConfig {
+//     fn from(value: &str) -> Self {}
+// }
+
 impl NetworkConfig {
+    fn get_connection(name: &str) {}
+
     /// Save the NetworkConfig to disk.
     pub async fn save(&self) -> Result<()> {
         let client = Client::new_future().await?;
@@ -39,14 +45,15 @@ impl NetworkConfig {
         nm_ipcfg.clear_addresses();
         nm_ipcfg.clear_dns();
         let new_addr: _;
-        let mut inet = libc::AF_INET;
-        if ipcfg.address.contains(":") {
-            inet = libc::AF_INET6;
+        let inet: _;
+        match ipcfg.address {
+            IpAddr::V4(_) => inet = libc::AF_INET,
+            IpAddr::V6(_) => inet = libc::AF_INET6,
         }
-        new_addr = IPAddress::new(inet, &ipcfg.address, ipcfg.prefix)?;
+        new_addr = IPAddress::new(inet, &ipcfg.address.to_string(), ipcfg.prefix)?;
         nm_ipcfg.add_address(&new_addr);
-        nm_ipcfg.set_gateway(Some(&ipcfg.gateway));
-        nm_ipcfg.add_dns(&ipcfg.dns);
+        nm_ipcfg.set_gateway(Some(&ipcfg.gateway.to_string()));
+        nm_ipcfg.add_dns(&ipcfg.dns.to_string());
         nm_ipcfg.set_method(Some(&SETTING_IP4_CONFIG_METHOD_MANUAL));
         Ok(())
     }
@@ -104,14 +111,17 @@ impl NetworkConfig {
         if let Some(nm_ipcfg_) = nm_ipcfg {
             NetworkConfig::set_manual(nm_ipcfg_, ipcfg)?;
         } else {
-            if ipcfg.version == 4 {
-                let nm_ipcfg = SettingIP4Config::new();
-                NetworkConfig::set_manual(&nm_ipcfg, ipcfg)?;
-                connection.add_setting(&nm_ipcfg);
-            } else {
-                let nm_ipcfg = SettingIP6Config::new();
-                NetworkConfig::set_manual(&nm_ipcfg, ipcfg)?;
-                connection.add_setting(&nm_ipcfg);
+            match ipcfg.address {
+                IpAddr::V4(_) => {
+                    let nm_ipcfg = SettingIP4Config::new();
+                    NetworkConfig::set_manual(&nm_ipcfg, ipcfg)?;
+                    connection.add_setting(&nm_ipcfg);
+                }
+                IpAddr::V6(_) => {
+                    let nm_ipcfg = SettingIP6Config::new();
+                    NetworkConfig::set_manual(&nm_ipcfg, ipcfg)?;
+                    connection.add_setting(&nm_ipcfg);
+                }
             }
         }
         Ok(())
@@ -154,17 +164,15 @@ mod tests {
             let example = NetworkConfig {
                 name: "CMCC-cGQe".to_string(),
                 ipv4cfg: Some(IPConfig {
-                    version: 4,
-                    address: "192.168.233.233".to_string(),
-                    gateway: "192.168.233.1".to_string(),
-                    dns: "8.8.8.8".to_string(),
+                    address: "192.168.233.233".parse().unwrap(),
+                    gateway: "192.168.233.1".parse().unwrap(),
+                    dns: "8.8.8.8".parse().unwrap(),
                     prefix: 32,
                 }),
                 ipv6cfg: Some(IPConfig {
-                    version: 6,
-                    address: "::1".to_string(),
-                    gateway: "::1".to_string(),
-                    dns: "::1".to_string(),
+                    address: "::1".parse().unwrap(),
+                    gateway: "::1".parse().unwrap(),
+                    dns: "::1".parse().unwrap(),
                     prefix: 64,
                 }),
             };
@@ -174,7 +182,8 @@ mod tests {
             };
             ctx.spawn_local(future);
             gloop.run();
-        }).unwrap();
+        })
+        .unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         Ok(())
     }
