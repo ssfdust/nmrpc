@@ -1,0 +1,4 @@
+mod networkcfg;
+
+fn main() {
+}
