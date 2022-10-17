@@ -310,6 +310,7 @@ name = "nmrpc"
 version = "0.1.0"
 dependencies = [
  "eyre",
+ "futures-core",
  "futures-executor",
  "gio",
  "gio-sys",

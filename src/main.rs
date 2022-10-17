@@ -1,4 +1,7 @@
-mod networkcfg;
+#[macro_use]
+extern crate eyre;
 
-fn main() {
-}
+mod networkcfg;
+mod nmmgr;
+
+fn main() {}

@@ -26,3 +26,4 @@ eyre = "0.6.8"
 libc = "0.2.135"
 futures-executor = "0.3.24"
 tokio = { version = "1.21.2", features = ["full"] }
+futures-core = "0.3.24"

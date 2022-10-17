@@ -1,32 +1,117 @@
 extern crate glib;
 
+use super::nmmgr::MapNMManger;
 use eyre::Result;
+use glib::Cast;
 use libc;
 use nm::{
-    Client, ConnectionExt, IPAddress, SettingIP4Config, SettingIP6Config, SettingIPConfigExt,
-    SETTING_IP4_CONFIG_METHOD_AUTO, SETTING_IP4_CONFIG_METHOD_MANUAL,
+    Client, ConnectionExt, IPAddress, SettingIP4Config, SettingIP6Config, SettingIPConfig,
+    SettingIPConfigExt, SETTING_IP4_CONFIG_METHOD_AUTO, SETTING_IP4_CONFIG_METHOD_MANUAL,
+    SETTING_IP6_CONFIG_METHOD_AUTO, SETTING_IP6_CONFIG_METHOD_MANUAL,
 };
-use std::net::IpAddr;
+use std::{fmt::Display, net::IpAddr};
 
+/// The Ip configuration struct
+#[derive(Debug)]
 pub struct IPConfig {
     address: IpAddr,
-    gateway: IpAddr,
-    dns: IpAddr,
+    gateway: Option<IpAddr>,
+    dns: Option<IpAddr>,
     prefix: u32,
 }
 
+impl Display for IPConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "address: {}/{}\ngateway: {}\ndns: {}",
+            self.address,
+            self.prefix,
+            self.gateway.map_or(String::new(), |x| x.to_string()),
+            self.dns.map_or(String::new(), |x| x.to_string())
+        )
+    }
+}
+
+/// A simple Network Config consists of connection name,
+/// IpV4 configuration and IpV6 configuration.
+#[derive(Debug)]
 pub struct NetworkConfig {
+    /// The connection name
     name: String,
+    /// The IpV4 Config of the connection
     ipv4cfg: Option<IPConfig>,
+    /// The IpV6 Config of the connection
     ipv6cfg: Option<IPConfig>,
 }
 
-// impl From<&str> for NetworkConfig {
-//     fn from(value: &str) -> Self {}
-// }
+impl Display for NetworkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "\nname: {}\n\n===== ipv4 ===== \n{}\n===== ipv4 =====\n\n===== ipv6 =====\n{}\n===== ipv6 =====",
+            self.name,
+            self.ipv4cfg
+                .as_ref()
+                .map(|x| x.to_string())
+                .unwrap_or(String::new()),
+            self.ipv6cfg
+                .as_ref()
+                .map(|x| x.to_string())
+                .unwrap_or(String::new())
+        )
+    }
+}
+
+impl IPConfig {
+    fn from_settings(settings: SettingIPConfig) -> Option<Self> {
+        match settings.method() {
+            Some(val) if val == *SETTING_IP4_CONFIG_METHOD_MANUAL => {
+                let addr: IpAddr;
+                let prefix: u32;
+                let gateway: Option<IpAddr>;
+                let dns: Option<IpAddr>;
+                if let Some((Some(address), prefix_)) = settings
+                    .address(0)
+                    .map(|ipaddr| (ipaddr.address(), ipaddr.prefix()))
+                {
+                    addr = address.parse().unwrap();
+                    prefix = prefix_;
+                    gateway = settings.gateway().map(|x| x.to_string().parse().unwrap());
+                    dns = settings.dns(0).map(|x| x.to_string().parse().unwrap());
+                    return Some(IPConfig {
+                        address: addr,
+                        prefix,
+                        gateway,
+                        dns,
+                    });
+                } else {
+                    return None;
+                };
+            }
+            _ => None,
+        }
+    }
+}
 
 impl NetworkConfig {
-    fn get_connection(name: &str) {}
+    pub async fn new_future(name: &str) -> Result<Self> {
+        let mut mapnm_manger = MapNMManger::new_future(None).await?;
+        let conn = mapnm_manger.connection_by_name(name).await?;
+        let ipv4cfg = conn
+            .setting_ip4_config()
+            .map(|x| IPConfig::from_settings(x.upcast::<SettingIPConfig>()))
+            .unwrap_or(None);
+        let ipv6cfg = conn
+            .setting_ip6_config()
+            .map(|x| IPConfig::from_settings(x.upcast::<SettingIPConfig>()))
+            .unwrap_or(None);
+        Ok(NetworkConfig {
+            name: name.to_string(),
+            ipv4cfg,
+            ipv6cfg,
+        })
+    }
 
     /// Save the NetworkConfig to disk.
     pub async fn save(&self) -> Result<()> {
@@ -47,22 +132,36 @@ impl NetworkConfig {
         let new_addr: _;
         let inet: _;
         match ipcfg.address {
-            IpAddr::V4(_) => inet = libc::AF_INET,
-            IpAddr::V6(_) => inet = libc::AF_INET6,
+            IpAddr::V4(_) => {
+                inet = libc::AF_INET;
+                nm_ipcfg.set_method(Some(&SETTING_IP4_CONFIG_METHOD_MANUAL));
+            }
+            IpAddr::V6(_) => {
+                inet = libc::AF_INET6;
+                nm_ipcfg.set_method(Some(&SETTING_IP6_CONFIG_METHOD_MANUAL));
+            }
         }
         new_addr = IPAddress::new(inet, &ipcfg.address.to_string(), ipcfg.prefix)?;
         nm_ipcfg.add_address(&new_addr);
-        nm_ipcfg.set_gateway(Some(&ipcfg.gateway.to_string()));
-        nm_ipcfg.add_dns(&ipcfg.dns.to_string());
-        nm_ipcfg.set_method(Some(&SETTING_IP4_CONFIG_METHOD_MANUAL));
+        if let Some(gateway) = ipcfg.gateway {
+            nm_ipcfg.add_dns(gateway.to_string().as_str());
+        }
+        if let Some(dns) = ipcfg.dns {
+            nm_ipcfg.add_dns(dns.to_string().as_str());
+        }
         Ok(())
     }
 
     /// Set the NetworkManager Connection to DHCP.
-    fn set_dhcp(nm_ipcfg: &impl SettingIPConfigExt) -> Result<()> {
+    fn set_dhcp(nm_ipcfg: &impl SettingIPConfigExt, version: u32) -> Result<()> {
         nm_ipcfg.clear_addresses();
         nm_ipcfg.clear_dns();
-        nm_ipcfg.set_method(Some(&SETTING_IP4_CONFIG_METHOD_AUTO));
+        nm_ipcfg.set_gateway(None);
+        if version == 4 {
+            nm_ipcfg.set_method(Some(&SETTING_IP4_CONFIG_METHOD_AUTO));
+        } else {
+            nm_ipcfg.set_method(Some(&SETTING_IP6_CONFIG_METHOD_AUTO));
+        }
         Ok(())
     }
 
@@ -134,15 +233,15 @@ impl NetworkConfig {
         version: u32,
     ) -> Result<()> {
         if let Some(nm_ipcfg) = nm_ipcfg {
-            NetworkConfig::set_dhcp(nm_ipcfg)?;
+            NetworkConfig::set_dhcp(nm_ipcfg, version)?;
         } else {
             if version == 4 {
                 let nm_ipcfg = SettingIP4Config::new();
-                NetworkConfig::set_dhcp(&nm_ipcfg)?;
+                NetworkConfig::set_dhcp(&nm_ipcfg, version)?;
                 connection.add_setting(&nm_ipcfg);
             } else {
                 let nm_ipcfg = SettingIP6Config::new();
-                NetworkConfig::set_dhcp(&nm_ipcfg)?;
+                NetworkConfig::set_dhcp(&nm_ipcfg, version)?;
                 connection.add_setting(&nm_ipcfg);
             }
         }
@@ -155,36 +254,29 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_setting() -> Result<()> {
+    async fn test_setting() {
         let ctx = glib::MainContext::default();
-        let gloop = glib::MainLoop::new(Some(&ctx), false);
-
-        ctx.with_thread_default(|| {
-            let l_clone = gloop.clone();
-            let example = NetworkConfig {
-                name: "CMCC-cGQe".to_string(),
-                ipv4cfg: Some(IPConfig {
-                    address: "192.168.233.233".parse().unwrap(),
-                    gateway: "192.168.233.1".parse().unwrap(),
-                    dns: "8.8.8.8".parse().unwrap(),
-                    prefix: 32,
-                }),
-                ipv6cfg: Some(IPConfig {
-                    address: "::1".parse().unwrap(),
-                    gateway: "::1".parse().unwrap(),
-                    dns: "::1".parse().unwrap(),
-                    prefix: 64,
-                }),
-            };
-            let future = async move {
-                example.save().await.unwrap();
-                l_clone.quit();
-            };
-            ctx.spawn_local(future);
-            gloop.run();
-        })
-        .unwrap();
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        Ok(())
+        loop {
+            match ctx.with_thread_default(|| {
+                let example = NetworkConfig {
+                    name: "eth0".to_string(),
+                    ipv4cfg: Some(IPConfig {
+                        address: "192.168.233.233".parse().unwrap(),
+                        gateway: Some("192.168.233.1".parse().unwrap()),
+                        dns: Some("8.8.8.8".parse().unwrap()),
+                        prefix: 32,
+                    }),
+                    ipv6cfg: None,
+                };
+                ctx.block_on(example.save()).unwrap();
+                println!(
+                    "{}",
+                    ctx.block_on(NetworkConfig::new_future("eth0")).unwrap()
+                );
+            }) {
+                Ok(_) => break,
+                _ => (),
+            }
+        }
     }
 }
